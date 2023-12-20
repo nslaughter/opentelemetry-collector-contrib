@@ -244,6 +244,29 @@ type Config struct {
 	CacheResourcesDefinitions               float64                       `mapstructure:"cache_resources_definitions"`
 	MaximumNumberOfMetricsInACall           int                           `mapstructure:"maximum_number_of_metrics_in_a_call"`
 	AppendTagsAsAttributes                  bool                          `mapstructure:"append_tags_as_attributes"`
+
+	metricsConfig map[string]metricConfig
+}
+
+type metricConfig struct {
+	resourceURI string
+	namespace string
+	name string
+	aggregations []string //
+	timeGrain string
+}
+
+// TODO: define a definition store for metrics.
+// This will provide a facility for grouping metrics by particular keys and
+// allow for more efficient retrieval - i.e. fewer calls to the Azure Monitor API
+
+// TODO: move to a utils
+func calculateKey(resourceURI, namespace, name string) string {
+	return fmt.Sprintf("%s/%s/%s", resourceURI, namespace, name)
+}
+
+func (m metricConfig) key() string {
+	return calculateKey(m.resourceURI, m.namespace, m.name)
 }
 
 const (

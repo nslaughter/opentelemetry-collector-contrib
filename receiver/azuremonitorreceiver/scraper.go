@@ -21,6 +21,9 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/monitor/azquery"
+
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
@@ -78,6 +81,13 @@ type azureResourceMetrics struct {
 
 type void struct{}
 
+var mdp = NewProvider[string, *azquery.MetricDefinition](
+	time.Second * 20,
+	func() (map[string]*azquery.MetricDefinition, error) {
+		return make(map[string]*azquery.MetricDefinition, 0), nil
+	},
+)
+
 func newScraper(conf *Config, settings receiver.CreateSettings) *azureScraper {
 	return &azureScraper{
 		cfg:                             conf,
@@ -89,6 +99,10 @@ func newScraper(conf *Config, settings receiver.CreateSettings) *azureScraper {
 		armMonitorDefinitionsClientFunc: armmonitor.NewMetricDefinitionsClient,
 		armMonitorMetricsClientFunc:     armmonitor.NewMetricsClient,
 		mutex:                           &sync.Mutex{},
+
+		metricDefinitionsProvider: mdp,
+
+		// metricsClient: azquery.MetricsClient,
 	}
 }
 
@@ -111,10 +125,72 @@ type azureScraper struct {
 	armMonitorDefinitionsClientFunc func(string, azcore.TokenCredential, *arm.ClientOptions) (*armmonitor.MetricDefinitionsClient, error)
 	armMonitorMetricsClientFunc     func(string, azcore.TokenCredential, *arm.ClientOptions) (*armmonitor.MetricsClient, error)
 	mutex                           *sync.Mutex
+
+	metricsClient     				azquery.MetricsClient
+	// metricDefinitions map[string]*azquery.MetricDefinition
+	metricDefinitionsProvider 		*Provider[string, *azquery.MetricDefinition]
 }
 
 type ArmClient interface {
 	NewListPager(options *armresources.ClientListOptions) *runtime.Pager[armresources.ClientListResponse]
+}
+
+// var metricsClient azquery.MetricsClient
+
+// The purpose of this logic is to avoid querying the same metric set multiple times
+// and to avoid making too many requests to Azure Monitor API.
+// Store metric sets indexed by composite key of what varies per metric:
+// 1. resourceURI
+// 2. timeGrain
+// 3. timeSpan
+// 4. aggregations
+var queryOptionsMap = map[string]*azquery.MetricsClientQueryResourceOptions{}
+
+// TODO: to support configuration per resource or per metric with grouping we need to
+// store the configuration in a map indexed by the key calculated from the configuration
+func (s *azureScraper) calculateKey(md *azquery.MetricDefinition) string {
+	return fmt.Sprintf("%s-%s-%s", *md.ResourceID, *md.Namespace, *md.Name.LocalizedValue)
+}
+
+
+// updateMetricDefinitions - gets all metric definitions for resources
+func (s *azureScraper) updateMetricDefinitions(ctx context.Context) error {
+	for resourceURI := range s.resources {
+		// st = time.Now() minus minute as 8601 string
+		st := time.Now().Add(-time.Minute).Format(time.RFC3339)
+		namespacesPager := s.metricsClient.NewListNamespacesPager(
+			resourceURI,
+			&azquery.MetricsClientListNamespacesOptions{
+				// TODO: get the time to subtract from the config
+				// but it should be at least 1 minute and needs to be added to the config
+				StartTime: &st,
+			},
+		)
+		// Resources can have metrics in different namespaces, so page the namespaces
+		// where each resource has metrics.
+		for namespacesPager.More() {
+			nextResult, err := namespacesPager.NextPage(ctx)
+			if err != nil {
+				return err
+			}
+			for _, namespace := range nextResult.Value {
+				opts := azquery.MetricsClientListDefinitionsOptions{
+					MetricNamespace: namespace.ID,
+				}
+				definitionsPager := s.metricsClient.NewListDefinitionsPager(resourceURI, &opts)
+				for definitionsPager.More() {
+					nextResult, err := definitionsPager.NextPage(ctx)
+					if err != nil {
+						return err
+					}
+					for _, def := range nextResult.Value {
+						_ = def
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (s *azureScraper) getArmClientOptions() *arm.ClientOptions {
@@ -154,6 +230,7 @@ type MetricsValuesClient interface {
 	)
 }
 
+// TODO: this isn't structural typing. Return a struct that implements MetricsValuesClient
 func (s *azureScraper) GetMetricsValuesClient() MetricsValuesClient {
 	client, _ := s.armMonitorMetricsClientFunc(s.cfg.SubscriptionID, s.cred, s.armClientOptions)
 	return client
@@ -190,8 +267,16 @@ func (s *azureScraper) loadCredentials() (err error) {
 	return nil
 }
 
-func (s *azureScraper) scrape(ctx context.Context) (pmetric.Metrics, error) {
+// getResources checks for cache expiration and if needed updates resources
+func (s *azureScraper) getResources(ctx context.Context) {
+	// checks cache first and if needed fetches and processes resources
+	if time.Since(s.resourcesUpdated).Seconds() < s.cfg.CacheResources {
+		return
+	}
+	s.updateResources(ctx)
+}
 
+func (s *azureScraper) scrape(ctx context.Context) (pmetric.Metrics, error) {
 	s.getResources(ctx)
 	resourcesIdsWithDefinitions := make(chan string)
 
@@ -219,10 +304,7 @@ func (s *azureScraper) scrape(ctx context.Context) (pmetric.Metrics, error) {
 	), nil
 }
 
-func (s *azureScraper) getResources(ctx context.Context) {
-	if time.Since(s.resourcesUpdated).Seconds() < s.cfg.CacheResources {
-		return
-	}
+func (s *azureScraper) updateResources(ctx context.Context) {
 	existingResources := map[string]void{}
 	for id := range s.resources {
 		existingResources[id] = void{}
@@ -242,6 +324,10 @@ func (s *azureScraper) getResources(ctx context.Context) {
 			return
 		}
 		for _, resource := range nextResult.Value {
+			// TODO: log or make a metric that we're adding a resource
+			if _, ok := s.resources[*resource.ID]; ok {
+				// log that we're updating a resource
+			}
 			if _, ok := s.resources[*resource.ID]; !ok {
 				resourceGroup := getResourceGroupFromID(*resource.ID)
 				attributes := map[string]*string{
@@ -269,16 +355,23 @@ func (s *azureScraper) getResources(ctx context.Context) {
 	s.resourcesUpdated = time.Now()
 }
 
+// getResourceGroupFromID returns the resource group from the resource ID
 func getResourceGroupFromID(id string) string {
+	// TODO: compile regexp once
 	var s = regexp.MustCompile(`\/resourcegroups/([^\/]+)\/`)
 	match := s.FindStringSubmatch(strings.ToLower(id))
 
-	if len(match) == 2 {
-		return match[1]
+	if len(match) != 2 {
+		return ""
 	}
-	return ""
+	return match[1]
 }
 
+// getResourcesFilter builds the filter string for the Azure Resource API based on config
+// - resourceTypeFilter is `services` from config separated by `or`
+// - resourceGroupFilterString is `resourceGroups` from config separated by `or`
+// returns these values combined with `and`
+// the default value for Services is all services - list in `monitorServices`
 func (s *azureScraper) getResourcesFilter() string {
 	// TODO: switch to parsing services from
 	// https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/metrics-supported
@@ -286,10 +379,11 @@ func (s *azureScraper) getResourcesFilter() string {
 
 	resourcesGroupFilterString := ""
 	if len(s.cfg.ResourceGroups) > 0 {
-		resourcesGroupFilterString = fmt.Sprintf(" and (resourceGroup eq '%s')",
-			strings.Join(s.cfg.ResourceGroups, "' or resourceGroup eq  '"))
+		resourcesGroupFilterString = fmt.Sprintf(
+			" and (resourceGroup eq '%s')",
+			strings.Join(s.cfg.ResourceGroups, "' or resourceGroup eq  '"),
+		)
 	}
-
 	return fmt.Sprintf("(resourceType eq '%s')%s", resourcesTypeFilter, resourcesGroupFilterString)
 }
 
