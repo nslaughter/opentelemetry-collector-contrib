@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/monitor/azquery"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/azuremonitorreceiver/internal/azuresdk"
+//	"github.com/Azure/azure-sdk-for-go/sdk/monitor/azquery"
+//	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
+//	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/azuremonitorreceiver/internal/azuresdk"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap"
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -213,6 +213,7 @@ func (mb *MetricsBuilder) addMetric(resourceMetricID, logicalMetricID, unit stri
 	return mb.metrics[resourceMetricID], nil
 }
 
+/*
 // Can we change this to AddMetric(resourceID, metric)?
 // In this function we can (1) flatten to multiple metrics by aggregation type, (2) add resource attributes,
 func (mb *MetricsBuilder) AddMetric(resource *armresources.GenericResourceExpanded, metric *azquery.Metric) {
@@ -229,10 +230,11 @@ func (mb *MetricsBuilder) AddMetric(resource *armresources.GenericResourceExpand
 	// 		range over aggregations
 	// 			range over values
 	// 				add datapoint to metric
-
+	m, ok := mb.getMetric(*metric.ID)
+	ts := metric.TimeSeries[0].Data[0].TimeStamp
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(mb.startTime)
-	dp.SetTimestamp(ts)
+	dp.SetTimestamp(pcommon.NewTimestampFromTime(*ts))
 	dp.SetDoubleValue(val)
 	dp.Attributes().PutStr("azuremonitor.resource_id", *resource.ID)
 	attrs := azuresdk.CalculateResourceAttributes(resource)
@@ -240,6 +242,7 @@ func (mb *MetricsBuilder) AddMetric(resource *armresources.GenericResourceExpand
 		dp.Attributes().PutStr(key, *value)
 	}
 }
+*/
 
 func (mb *MetricsBuilder) AddDataPoint(
 	resourceID,

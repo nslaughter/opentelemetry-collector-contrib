@@ -24,24 +24,23 @@ func mustHandleAllPossibleMetricUnitValues() {
 }
 
 // We may also need to provide return of []struct{name: string, value: *float64}
-func ExtractAggregations(m *azquery.MetricValue) map[azquery.AggregationType]*float64 {
+func GetAggregationValues(d *azquery.MetricDefinition, m *azquery.MetricValue) map[string]*float64 {
 	// TODO: instead of requiring the SDK packages in the scraper code we could handle all metric
 	// values here over here and in receiver code use strings or a type alias
-	aggs := make(map[azquery.AggregationType]*float64)
-	if m.Average != nil {
-		aggs[azquery.AggregationTypeAverage] = m.Average
-	}
-	if m.Count != nil {
-		aggs[azquery.AggregationTypeCount] = m.Count
-	}
-	if m.Maximum != nil {
-		aggs[azquery.AggregationTypeMaximum] = m.Maximum
-	}
-	if m.Minimum != nil {
-		aggs[azquery.AggregationTypeMinimum] = m.Minimum
-	}
-	if m.Total != nil {
-		aggs[azquery.AggregationTypeTotal] = m.Total
+	aggs := make(map[string]*float64)
+	for _, agg := range d.SupportedAggregationTypes {
+		switch *agg {
+		case azquery.AggregationTypeAverage:
+			aggs[string(*agg)] = m.Average
+		case azquery.AggregationTypeCount:
+			aggs[string(*agg)] = m.Count
+		case azquery.AggregationTypeMaximum:
+			aggs[string(*agg)] = m.Maximum
+		case azquery.AggregationTypeMinimum:
+			aggs[string(*agg)] = m.Minimum
+		case azquery.AggregationTypeTotal:
+			aggs[string(*agg)] = m.Total
+		}
 	}
 	return aggs
 }
@@ -66,9 +65,9 @@ var azureMonitorUnits = map[azquery.MetricUnit]string{
 }
 
 // ToOTelUnits maps Azure Monitor units to OpenTelemetry units
-func ToOTelUnits(a azquery.MetricUnit) string {
+func ToOTelUnits(a *azquery.MetricUnit) string {
 	// not checking ok because use of azquery.MetricUnit SDK defined type enum ensures we handle all possible values
 	// since we init with mustHandleAllPossibleMetricUnitValues()
-	v := azureMonitorUnits[a]
+	v := azureMonitorUnits[*a]
 	return v
 }

@@ -28,7 +28,7 @@ func fakeListByResourceGroupResponder() azfake.PagerResponder[armresources.Clien
 		200,
 		armresources.ClientListByResourceGroupResponse{
 			ResourceListResult: armresources.ResourceListResult{
-				Value: []*armresources.GenericResourceExpanded {
+				Value: []*armresources.GenericResourceExpanded{
 					{
 						ID:   to.Ptr("fakeID1"),
 						Name: to.Ptr("fakeName1"),
@@ -63,6 +63,10 @@ func fakeListResourcesResponder() azfake.PagerResponder[armresources.ClientListR
 						ID:   to.Ptr("fakeID2"),
 						Name: to.Ptr("fakeName2"),
 					},
+					{
+						ID:   to.Ptr("fakeID3"),
+						Name: to.Ptr("fakeName3"),
+					},
 				},
 			},
 		},
@@ -80,14 +84,14 @@ func fakeMetricDefinitionResponder() azfake.PagerResponder[azquery.MetricsClient
 			MetricDefinitionCollection: azquery.MetricDefinitionCollection{
 				Value: []*azquery.MetricDefinition{
 					{
-						ID:   to.Ptr("fakeID1"),
+						ID:         to.Ptr("fakeID1"),
 						ResourceID: to.Ptr("fakeResourceID1"),
-						Name: toLocalizableString("fakeName1"),
+						Name:       toLocalizableString("fakeName1"),
 					},
 					{
-						ID:   to.Ptr("fakeID2"),
+						ID:         to.Ptr("fakeID2"),
 						ResourceID: to.Ptr("fakeResourceID2"),
-						Name: toLocalizableString("fakeName2"),
+						Name:       toLocalizableString("fakeName2"),
 					},
 				},
 			},
@@ -103,15 +107,19 @@ func fakeQueryResourceResponder() azfake.PagerResponder[azquery.MetricsClientQue
 	r.AddPage(
 		200,
 		azquery.MetricsClientQueryResourceResponse{
-			Response: azquery.Response {
-				Value: []*azquery.Metric {
+			Response: azquery.Response{
+				Value: []*azquery.Metric{
 					{
-						ID: to.Ptr("fakeID1"),
+						ID:   to.Ptr("fakeID1"),
 						Name: toLocalizableString("fakeName1"),
 					},
 					{
-						ID: to.Ptr("fakeID2"),
+						ID:   to.Ptr("fakeID2"),
 						Name: toLocalizableString("fakeName2"),
+					},
+					{
+						ID:   to.Ptr("fakeID3"),
+						Name: toLocalizableString("fakeName3"),
 					},
 				},
 			},
@@ -122,9 +130,9 @@ func fakeQueryResourceResponder() azfake.PagerResponder[azquery.MetricsClientQue
 }
 
 type responderValues struct {
-    StatusCode int
-    ID1, Name1 string
-    ID2, Name2 string
+	StatusCode int
+	ID1, Name1 string
+	ID2, Name2 string
 }
 
 func toLocalizableString(s string) *azquery.LocalizableString {
@@ -134,7 +142,7 @@ func toLocalizableString(s string) *azquery.LocalizableString {
 }
 
 func fakeServerFactory() fake.ServerFactory {
-	return fake.ServerFactory {
+	return fake.ServerFactory{
 		Server: fake.Server{
 			NewListPager: func(_ *armresources.ClientListOptions) azfake.PagerResponder[armresources.ClientListResponse] {
 				return fakeListResourcesResponder()
@@ -147,18 +155,18 @@ func fakeServerFactory() fake.ServerFactory {
 }
 
 var testCases = []struct {
-	name string
-	data responderValues
+	name      string
+	data      responderValues
 	expectErr bool
 }{
 	{
 		name: "successful processing",
-		data: responderValues {
+		data: responderValues{
 			StatusCode: 200,
-			ID1: "fakeID1",
-			Name1: "fakeName1",
-			ID2: "fakeID2",
-			Name2: "fakeName2",
+			ID1:        "fakeID1",
+			Name1:      "fakeName1",
+			ID2:        "fakeID2",
+			Name2:      "fakeName2",
 		},
 		expectErr: false,
 	},
@@ -166,10 +174,10 @@ var testCases = []struct {
 		name: "error during page extraction",
 		data: responderValues{
 			StatusCode: 200,
-			ID1: "fakeID1",
-			Name1: "fakeName1",
-			ID2: "fakeID2",
-			Name2: "fakeName2",
+			ID1:        "fakeID1",
+			Name1:      "fakeName1",
+			ID2:        "fakeID2",
+			Name2:      "fakeName2",
 		},
 	},
 }
@@ -177,9 +185,10 @@ var testCases = []struct {
 // At this time the purpose of the test is to show use of the ProcessPager function for
 // handling multiple pages with multiple items.
 // TODO: Add cases for error handling - potentially providing for injection of error handlers
-// 			in the ProcessPager function.
+//
+//	in the ProcessPager function.
 func TestProcessPagerClient(t *testing.T) {
-    ctx := context.Background()
+	ctx := context.Background()
 	f := fakeServerFactory()
 	c, _ := armresources.NewClient(
 		"fake-subscription-id",
@@ -208,11 +217,11 @@ func TestProcessPagerClient(t *testing.T) {
 			err := azuresdk.ProcessPager[armresources.ClientListResponse, *armresources.GenericResourceExpanded](ctx, pager, extract, process)
 			assert.NoError(t, err)
 		})
-    }
+	}
 }
 
 func TestProcessPagerByResourceGroupClient(t *testing.T) {
-    ctx := context.Background()
+	ctx := context.Background()
 	f := fakeServerFactory()
 
 	c, _ := armresources.NewClient(
@@ -243,41 +252,5 @@ func TestProcessPagerByResourceGroupClient(t *testing.T) {
 			err := azuresdk.ProcessPager[armresources.ClientListByResourceGroupResponse, *armresources.GenericResourceExpanded](ctx, pager, extract, process)
 			assert.NoError(t, err)
 		})
-    }
-}
-
-/*
-func TestProcessPagerQueryResourceClient(t *testing.T) {
-	ctx := context.Background()
-	f := fakeServerFactory()
-
-	c, _ := azquery.NewMetricsClient(
-		&azfake.TokenCredential{},
-		&azquery.MetricsClientOptions{
-			ClientOptions: azcore.ClientOptions{
-				Transport: fake.NewServerTransport(&f.Server),
-			},
-		},
-	)
-
-	// run all cases in parallel
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			pager := c.NewQueryResourcePager("fake-resource-group-name", "fake-resource-name", &azquery.MetricsClientQueryResourceOptions{})
-			extract := func(page azquery.MetricsClientQueryResourceResponse) []*azquery.Metric {
-				return page.Value
-			}
-
-			process := func(ctx context.Context, v *azquery.Metric) error {
-				t.Log(*v.Name)
-				return nil
-			}
-
-			err := azuresdk.ProcessPager[azquery.MetricsClientQueryResourceResponse, *azquery.Metric](ctx, pager, extract, process)
-			assert.NoError(t, err)
-		})
 	}
 }
-*/
