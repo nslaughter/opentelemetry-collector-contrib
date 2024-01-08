@@ -21,12 +21,14 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/azquery"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver"
 	"go.uber.org/zap"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/azuremonitorreceiver/internal/azuresdk"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/azuremonitorreceiver/internal/metadata"
 )
 
@@ -41,42 +43,17 @@ var (
 		"PT12H": 43200,
 		"P1D":   86400,
 	}
-	aggregations = []string{
-		"Average",
-		"Count",
-		"Maximum",
-		"Minimum",
-		"Total",
-	}
 )
-
-const (
-	attributeLocation      = "location"
-	attributeName          = "name"
-	attributeResourceGroup = "resource_group"
-	attributeResourceType  = "type"
-	metadataPrefix         = "metadata_"
-	tagPrefix              = "tags_"
-)
-
-type azureResource struct {
-	attributes                map[string]*string
-	metricsByCompositeKey     map[metricsCompositeKey]*azureResourceMetrics
-	metricsDefinitionsUpdated time.Time
-	tags                      map[string]*string
-}
-
-type metricsCompositeKey struct {
-	dimensions string // comma separated sorted dimensions
-	timeGrain  string
-}
-
-type azureResourceMetrics struct {
-	metrics              []string
-	metricsValuesUpdated time.Time
-}
 
 type void struct{}
+
+type azureResourceData struct {
+	resource 			*armresources.GenericResourceExpanded
+	metricDefinitions	map[string]*azquery.MetricDefinition
+	// TODO: could we refactor to make these getters, so we don't need to precompute?
+	attributes 			map[string]*string
+	tags       			map[string]*string
+}
 
 func newScraper(conf *Config, settings receiver.CreateSettings) *azureScraper {
 	return &azureScraper{
@@ -86,90 +63,169 @@ func newScraper(conf *Config, settings receiver.CreateSettings) *azureScraper {
 		azIDCredentialsFunc:             azidentity.NewClientSecretCredential,
 		azIDWorkloadFunc:                azidentity.NewWorkloadIdentityCredential,
 		armClientFunc:                   armresources.NewClient,
-		armMonitorDefinitionsClientFunc: armmonitor.NewMetricDefinitionsClient,
-		armMonitorMetricsClientFunc:     armmonitor.NewMetricsClient,
+
+		// resources:						 map[string]azureResource,
+		resources:						 sync.Map
 		mutex:                           &sync.Mutex{},
 	}
 }
 
+type ResourceCache[T comparable, U any] struct {
+	store sync.Map
+}
+
+func (rc *ResourceCache) Get(key T) (U, bool) {
+	return rc.store.Load(key)
+}
+
+func (rc *ResourceCache) Set(key T, value U) {
+	rc.store.Store(key, value)
+}
+
+func (rc *ResourceCache) Delete(key T) {
+	rc.store.Delete(key)
+}
+
+func (rc *ResourceCache) Clean(keys []T) {
+	for _, key := range keys {
+		rc.Delete(key)
+	}
+}
+
+func (rc *ResourceCache) Range(f func(key T, value U) bool) {
+	rc.store.Range(func(key, value interface{}) bool {
+		return f(key.(T), value.(U))
+	})
+}
+
+func (rc *ResourceCache) KeySet() map[string]void {
+	keyset := map[string]void{}
+	for key := range rc.store {
+		keyset[key.(string)] = void{}
+	}
+	return keyset
+}
+
+
 type azureScraper struct {
 	cred azcore.TokenCredential
 
-	clientResources          ArmClient
-	clientMetricsDefinitions MetricsDefinitionsClientInterface
-	clientMetricsValues      MetricsValuesClient
+	// clientResources          ArmClient
+	// clientMetricsDefinitions MetricsDefinitionsClientInterface
+	// clientMetricsValues      MetricsValuesClient
 
 	cfg                             *Config
 	settings                        component.TelemetrySettings
-	resources                       map[string]*azureResource
 	resourcesUpdated                time.Time
 	mb                              *metadata.MetricsBuilder
 	azIDCredentialsFunc             func(string, string, string, *azidentity.ClientSecretCredentialOptions) (*azidentity.ClientSecretCredential, error)
 	azIDWorkloadFunc                func(options *azidentity.WorkloadIdentityCredentialOptions) (*azidentity.WorkloadIdentityCredential, error)
 	armClientOptions                *arm.ClientOptions
 	armClientFunc                   func(string, azcore.TokenCredential, *arm.ClientOptions) (*armresources.Client, error)
-	armMonitorDefinitionsClientFunc func(string, azcore.TokenCredential, *arm.ClientOptions) (*armmonitor.MetricDefinitionsClient, error)
-	armMonitorMetricsClientFunc     func(string, azcore.TokenCredential, *arm.ClientOptions) (*armmonitor.MetricsClient, error)
-	mutex                           *sync.Mutex
+	// armMonitorDefinitionsClientFunc func(string, azcore.TokenCredential, *arm.ClientOptions) (*armmonitor.MetricDefinitionsClient, error)
+	metricsClient 					*azquery.MetricsClient
+	resourcesClientFactory 			*armresources.ClientFactory
+	resourcesClient 				*armresources.Client
+	resourceGroupsClient 			*armresources.ResourceGroupsClient
+
+	// resources 						map[string]azureResourceData
+	resources 						ResourceCache
+
+	rwMu                            *sync.RWMutex
 }
 
-type ArmClient interface {
-	NewListPager(options *armresources.ClientListOptions) *runtime.Pager[armresources.ClientListResponse]
+// TODO: see what the race detector wants to protect the resources map
+
+// resourceUpdater is a goroutine that periodically checks the TTL of resource metadata and updates it when necessary.
+func (s *azureScraper) runMetricMetadataUpdates(ctx context.Context) {
+	ticker := time.NewTicker(s.cfg.CacheResources)
+	defer ticker.Stop()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.updateMetricMetadata(ctx)
+			}
+		}
+	}()
 }
 
-func (s *azureScraper) getArmClientOptions() *arm.ClientOptions {
-	var cloudToUse cloud.Configuration
-	switch s.cfg.Cloud {
-	case azureGovernmentCloud:
-		cloudToUse = cloud.AzureGovernment
-	default:
-		cloudToUse = cloud.AzurePublic
+func (s *azureScraper) updateResourceCache(ctx context.Context) {
+	// fetch definitions
+	currentKeys := s.resources.KeySet()
+	rs, err := s.fetchResources(ctx)
+	if err != nil {
+		s.settings.Logger.Error("failed to get Azure Resources data", zap.Error(err))
+		return
 	}
-	options := arm.ClientOptions{
-		ClientOptions: azcore.ClientOptions{
-			Cloud: cloudToUse,
+	for _, r := range rs {
+		defs, err = s.fetchDefinitions(ctx, rs)
+		if err != nil {
+			s.settings.Logger.Error("failed to get Azure Metrics definitions data", zap.Error(err))
+			return
+		}
+		s.resources.Set(*r.ID, &azureResourceData{
+			resource: r,
+			metricDefinitions: defs,
+			attributes: azuresdk.CalculateResourceAttributes(r),
+			tags: r.Tags,
+		})
+		delete(currentKeys, *r.ID)
+	}
+
+	// evicts resources that weren't found in update
+	s.resources.Clean(currentKeys)
+}
+
+func (s *azureScraper) fetchResources(ctx context.Context) ([]*armresources.GenericResourceExpanded, error) {
+	filter := azuresdk.CalculateResourcesFilter(s.cfg.Services, s.cfg.ResourceGroups)
+	opts := &armresources.ClientListOptions{
+		Filter: to.Ptr(filter),
+	}
+	var results []*armresources.GenericResourceExpanded
+	err := azuresdk.ProcessPager(
+		ctx,
+		s.resourcesClient.NewListPager(opts),
+		// TODO: use our Extractor in the AzureSDK package
+		func(page armresources.ClientListResponse) []*armresources.GenericResourceExpanded {
+			return page.Value
 		},
-	}
-
-	return &options
-}
-
-func (s *azureScraper) getArmClient() ArmClient {
-	client, _ := s.armClientFunc(s.cfg.SubscriptionID, s.cred, s.armClientOptions)
-	return client
-}
-
-type MetricsDefinitionsClientInterface interface {
-	NewListPager(resourceURI string, options *armmonitor.MetricDefinitionsClientListOptions) *runtime.Pager[armmonitor.MetricDefinitionsClientListResponse]
-}
-
-func (s *azureScraper) getMetricsDefinitionsClient() MetricsDefinitionsClientInterface {
-	client, _ := s.armMonitorDefinitionsClientFunc(s.cfg.SubscriptionID, s.cred, s.armClientOptions)
-	return client
-}
-
-type MetricsValuesClient interface {
-	List(ctx context.Context, resourceURI string, options *armmonitor.MetricsClientListOptions) (
-		armmonitor.MetricsClientListResponse, error,
+		func(ctx context.Context, resource *armresources.GenericResourceExpanded) error {
+			results = append(results, resource)
+			return nil
+		},
 	)
+	return nil, err
 }
 
-func (s *azureScraper) GetMetricsValuesClient() MetricsValuesClient {
-	client, _ := s.armMonitorMetricsClientFunc(s.cfg.SubscriptionID, s.cred, s.armClientOptions)
-	return client
+func (s *azureScraper) fetchDefinitions(ctx context.Context, rid string) (map[string]*azquery.MetricDefinition, error) {
+	var defs map[string]*azquery.MetricDefinition
+
+	err := azuresdk.ProcessPager(
+		ctx,
+		s.clientMetricsDefinitions.NewListPager(rid),
+		func(page azquery.MetricsClientListDefinitionsResponse) []*azquery.MetricDefinition {
+			return page.Value
+		},
+		func(ctx context.Context, v *azquery.MetricDefinition) error {
+			defs[*v.ID] = v
+			return nil
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return defs, nil
 }
 
 func (s *azureScraper) start(_ context.Context, _ component.Host) (err error) {
 	if err = s.loadCredentials(); err != nil {
 		return err
 	}
-
-	s.armClientOptions = s.getArmClientOptions()
-	s.clientResources = s.getArmClient()
-	s.clientMetricsDefinitions = s.getMetricsDefinitionsClient()
-	s.clientMetricsValues = s.GetMetricsValuesClient()
-
-	s.resources = map[string]*azureResource{}
+	s.updateMetricMetadata(ctx)
+	s.runMetricMetadataUpdates(ctx)
 
 	return
 }
@@ -189,76 +245,116 @@ func (s *azureScraper) loadCredentials() (err error) {
 	}
 	return nil
 }
-
-func (s *azureScraper) scrape(ctx context.Context) (pmetric.Metrics, error) {
-
-	s.getResources(ctx)
-	resourcesIdsWithDefinitions := make(chan string)
-
-	go func() {
-		defer close(resourcesIdsWithDefinitions)
-		for resourceID := range s.resources {
-			s.getResourceMetricsDefinitions(ctx, resourceID)
-			resourcesIdsWithDefinitions <- resourceID
-		}
-	}()
-
-	var wg sync.WaitGroup
-	for resourceID := range resourcesIdsWithDefinitions {
-		wg.Add(1)
-		go func(resourceID string) {
-			defer wg.Done()
-			s.getResourceMetricsValues(ctx, resourceID)
-		}(resourceID)
+/*
+func (s *azureScraper) getResources(ctx context.Context, opt) (map[string]*armresources.GenericResourceExpanded, error) {
+	pager := s.clientResources.NewListPager(nil)
+	var resources []*armresources.GenericResourceExpanded
+	if err := azuresdk.ProcessPager(
+		ctx,
+		pager,
+		func(page armresources.ClientListResponse) []*armresources.GenericResourceExpanded {
+			return page.Value
+		},
+		func(ctx context.Context, resource *armresources.GenericResourceExpanded) error {
+			resources = append(resources, resource)
+			return nil
+		},
+	); err != nil {
+		return nil, err
 	}
-	wg.Wait()
-
-	return s.mb.Emit(
-		metadata.WithAzureMonitorSubscriptionID(s.cfg.SubscriptionID),
-		metadata.WithAzureMonitorTenantID(s.cfg.TenantID),
-	), nil
+	return resources, nil
+}
+*/
+func (s *azureScraper) scrape(ctx context.Context) (pmetric.Metrics, error) {
+	// get are own copy of resources
+	rs := copy(s.resources)
+	var wg sync.WaitGroup
+	// TODO: use a one-writer pattern to fan out the work fan in the results
+	opts := &armresources.ClientListOptions{
+		Filter: to.Ptr(filter),
+	}
+	for k, v := range rs {
+		wg.Add(1)
+		go func(k string, v azureResourceData) {
+			defer wg.Done()
+			azuresdk.ProcessPager(
+				ctx,
+				s.metricsClient.NewListPager(k, opts),
+				func(page azquery.MetricsClientListResponse) []*azquery.Metric {
+					return page.Value
+				},
+				func(ctx context.Context, metric *azquery.Metric) error {
+					s.processMetric(ctx, metric)
+					return nil
+				},
+			)
+		}(k, v)
+	}
 }
 
-func (s *azureScraper) getResources(ctx context.Context) {
-	if time.Since(s.resourcesUpdated).Seconds() < s.cfg.CacheResources {
-		return
+func (s *azureScraper) processMetric(ctx context.Context, m *azquery.Metric) {
+	for _, timeseriesElement := range m.Timeseries {
+		if timeseriesElement.Data != nil {
+			attributes := map[string]*string{}
+			for name, value := range res.attributes {
+				attributes[name] = value
+			}
+			for _, value := range timeseriesElement.Metadatavalues {
+				name := metadataPrefix + *value.Name.Value
+				attributes[name] = value.Value
+			}
+			if s.cfg.AppendTagsAsAttributes {
+				for tagName, value := range res.tags {
+					name := tagPrefix + tagName
+					attributes[name] = value
+				}
+			}
+			for _, metricValue := range timeseriesElement.Data {
+				s.processTimeseriesData(resourceID, metric, metricValue, attributes)
+			}
+		}
 	}
+}
+
+// NOTE: instead of paging all resources in a subscription using a filter
+// we could use the ResourcesGroupsClient to get all ResourceGroups and then
+// use that client to get all resources in a ResourceGroup.
+/*
+func (s *azureScraper) updateResources(ctx context.Context) {
 	existingResources := map[string]void{}
 	for id := range s.resources {
 		existingResources[id] = void{}
 	}
 
-	filter := s.getResourcesFilter()
+	filter := azuresdk.CalculateResourcesFilter(s.cfg.Services, s.cfg.ResourceGroups)
 	opts := &armresources.ClientListOptions{
-		Filter: &filter,
+		Filter: to.Ptr(filter),
 	}
 
-	pager := s.clientResources.NewListPager(opts)
+	// pager := s.clientResources.NewListPager(opts)
 
-	for pager.More() {
-		nextResult, err := pager.NextPage(ctx)
-		if err != nil {
-			s.settings.Logger.Error("failed to get Azure Resources data", zap.Error(err))
-			return
-		}
-		for _, resource := range nextResult.Value {
-			if _, ok := s.resources[*resource.ID]; !ok {
-				resourceGroup := getResourceGroupFromID(*resource.ID)
-				attributes := map[string]*string{
-					attributeName:          resource.Name,
-					attributeResourceGroup: &resourceGroup,
-					attributeResourceType:  resource.Type,
-				}
-				if resource.Location != nil {
-					attributes[attributeLocation] = resource.Location
-				}
-				s.resources[*resource.ID] = &azureResource{
-					attributes: attributes,
-					tags:       resource.Tags,
-				}
+	if err := azuresdk.ProcessPager(
+		ctx,
+		s.resourcesClient.NewListPager(opts),
+		func(page armresources.ClientListResponse) []*armresources.GenericResourceExpanded {
+			return page.Value
+		},
+		func(ctx context.Context, resource *armresources.GenericResourceExpanded) error {
+			// rid fields: Parent, SubscriptionID, ResourceGroupName, Provider, Location, ResourceType, Name
+			attributes, err := azuresdk.CalculateResourceAttributes(resource)
+			if err != nil {
+				s.settings.Logger.Error("failed to calculate resource attributes", zap.Error(err))
+			}
+			s.resources[*resource.ID] = &azureResource{
+				attributes: attributes,
+				tags:       resource.Tags,
 			}
 			delete(existingResources, *resource.ID)
-		}
+			return nil
+		},
+	); err != nil {
+		s.settings.Logger.Error("failed to get Azure Resources data", zap.Error(err))
+		return
 	}
 	if len(existingResources) > 0 {
 		for idToDelete := range existingResources {
@@ -269,88 +365,37 @@ func (s *azureScraper) getResources(ctx context.Context) {
 	s.resourcesUpdated = time.Now()
 }
 
-func getResourceGroupFromID(id string) string {
-	var s = regexp.MustCompile(`\/resourcegroups/([^\/]+)\/`)
-	match := s.FindStringSubmatch(strings.ToLower(id))
-
-	if len(match) == 2 {
-		return match[1]
-	}
-	return ""
-}
-
-func (s *azureScraper) getResourcesFilter() string {
-	// TODO: switch to parsing services from
-	// https://learn.microsoft.com/en-us/azure/azure-monitor/essentials/metrics-supported
-	resourcesTypeFilter := strings.Join(s.cfg.Services, "' or resourceType eq '")
-
-	resourcesGroupFilterString := ""
-	if len(s.cfg.ResourceGroups) > 0 {
-		resourcesGroupFilterString = fmt.Sprintf(" and (resourceGroup eq '%s')",
-			strings.Join(s.cfg.ResourceGroups, "' or resourceGroup eq  '"))
-	}
-
-	return fmt.Sprintf("(resourceType eq '%s')%s", resourcesTypeFilter, resourcesGroupFilterString)
-}
-
-func (s *azureScraper) getResourceMetricsDefinitions(ctx context.Context, resourceID string) {
-
-	if time.Since(s.resources[resourceID].metricsDefinitionsUpdated).Seconds() < s.cfg.CacheResourcesDefinitions {
-		return
-	}
-
-	s.resources[resourceID].metricsByCompositeKey = map[metricsCompositeKey]*azureResourceMetrics{}
-
+func (s *azureScraper) updateMetricsDefinitions(ctx context.Context, resourceID string) {
+	var defs []*azquery.MetricDefinition
 	pager := s.clientMetricsDefinitions.NewListPager(resourceID, nil)
-	for pager.More() {
-		nextResult, err := pager.NextPage(ctx)
-		if err != nil {
-			s.settings.Logger.Error("failed to get Azure Metrics definitions data", zap.Error(err))
-			return
-		}
-
-		for _, v := range nextResult.Value {
-
-			timeGrain := *v.MetricAvailabilities[0].TimeGrain
-			name := *v.Name.Value
-			compositeKey := metricsCompositeKey{timeGrain: timeGrain}
-
-			if len(v.Dimensions) > 0 {
-				var dimensionsSlice []string
-				for _, dimension := range v.Dimensions {
-					if len(strings.TrimSpace(*dimension.Value)) > 0 {
-						dimensionsSlice = append(dimensionsSlice, *dimension.Value)
-					}
-				}
-				sort.Strings(dimensionsSlice)
-				compositeKey.dimensions = strings.Join(dimensionsSlice, ",")
-			}
-			s.storeMetricsDefinition(resourceID, name, compositeKey)
+	err := azuresdk.ProcessPager(
+		ctx,
+		pager,
+		func(page azquery.MetricsClientListDefinitionsResponse) []*azquery.MetricDefinition {
+			return page.Value
+		},
+		func(ctx context.Context, v *azquery.MetricDefinition) error {
+			defs = append(defs, v)
+			// s.metricDefinitions[*v.ID] = v
+			return nil
+		},
+	)
+	s.metricDefinitions[resourceID] = defs
+}
+*/
+func (s *azureScraper) processResourceMetricsValues(ctx context.Context, resourceID string) {
+	for _, resources := range s.resources {
+		for _, resource := range resources {
+			s.getResourceMetricsValues(ctx, resourceID)
 		}
 	}
-	s.resources[resourceID].metricsDefinitionsUpdated = time.Now()
-}
-
-func (s *azureScraper) storeMetricsDefinition(resourceID, name string, compositeKey metricsCompositeKey) {
-	if _, ok := s.resources[resourceID].metricsByCompositeKey[compositeKey]; ok {
-		s.resources[resourceID].metricsByCompositeKey[compositeKey].metrics = append(
-			s.resources[resourceID].metricsByCompositeKey[compositeKey].metrics, name,
-		)
-	} else {
-		s.resources[resourceID].metricsByCompositeKey[compositeKey] = &azureResourceMetrics{metrics: []string{name}}
-	}
-}
-
-func (s *azureScraper) getResourceMetricsValues(ctx context.Context, resourceID string) {
 	res := *s.resources[resourceID]
 
 	for compositeKey, metricsByGrain := range res.metricsByCompositeKey {
-
 		if time.Since(metricsByGrain.metricsValuesUpdated).Seconds() < float64(timeGrains[compositeKey.timeGrain]) {
 			continue
 		}
-		metricsByGrain.metricsValuesUpdated = time.Now()
-
+		// metricsByGrain.metricsValuesUpdated = time.Now()
 		start := 0
 
 		for start < len(metricsByGrain.metrics) {
@@ -378,6 +423,8 @@ func (s *azureScraper) getResourceMetricsValues(ctx context.Context, resourceID 
 				s.settings.Logger.Error("failed to get Azure Metrics values data", zap.Error(err))
 				return
 			}
+
+			err := s.
 
 			for _, metric := range result.Value {
 
@@ -408,6 +455,10 @@ func (s *azureScraper) getResourceMetricsValues(ctx context.Context, resourceID 
 	}
 }
 
+// NOTE: we're dropping this idea and could re-implement with something simpler if we
+// enable user config to specify dimensions. We no longer need this to group by dimensions
+// for batching fetches since azquery methods let us fetch all metrics for a resource in
+// a single call.
 func getResourceMetricsValuesRequestOptions(
 	metrics []string,
 	dimensionsStr string,
@@ -419,10 +470,16 @@ func getResourceMetricsValuesRequestOptions(
 	filter := armmonitor.MetricsClientListOptions{
 		Metricnames: &resType,
 		Interval:    to.Ptr(timeGrain),
+		// TODO: check this because it looks odd since .Timespan is a timeGrain here
+		// but SDK doc says it's expressed with the format 'startDateTimeISO/endDateTimeISO'.
 		Timespan:    to.Ptr(timeGrain),
 		Aggregation: to.Ptr(strings.Join(aggregations, ",")),
 	}
 
+	// NOTE: we're dropping this idea and could re-implement with something simpler if we
+	// enable user config to specify dimensions. We no longer need this to group by dimensions
+	// for batching fetches since azquery methods let us fetch all metrics for a resource in
+	// a single call.
 	if len(dimensionsStr) > 0 {
 		var dimensionsFilter bytes.Buffer
 		dimensions := strings.Split(dimensionsStr, ",")
@@ -448,30 +505,153 @@ func (s *azureScraper) processTimeseriesData(
 ) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-
+	// NOTE: we need to check whether the AzureSDK is providing a timestamp
+	// and prefer that one whenever possible. If anything we should be checking
+	// if the AzureSDK timestamp is valid - maybe a nil check combined with
+	// a time range check
 	ts := pcommon.NewTimestampFromTime(time.Now())
 
-	aggregationsData := []struct {
-		name  string
-		value *float64
-	}{
-		{"Average", metricValue.Average},
-		{"Count", metricValue.Count},
-		{"Maximum", metricValue.Maximum},
-		{"Minimum", metricValue.Minimum},
-		{"Total", metricValue.Total},
-	}
+	aggregations := azuresdk.ExtractAggregations(metricValue)
+
 	for _, aggregation := range aggregationsData {
 		if aggregation.value != nil {
+			// TODO: workout a more OTel idiom for AddDataPoint
 			s.mb.AddDataPoint(
 				resourceID,
 				*metric.Name.Value,
 				aggregation.name,
 				string(*metric.Unit),
 				attributes,
+				// metric.Timestamp,
 				ts,
 				*aggregation.value,
 			)
 		}
 	}
 }
+
+/*
+type azuerProvider struct {
+	clientFactory 			*armresources.ClientFactory
+	resourceGroupsClients	*armresources.ResourceGroupsClient
+	resourcesClient 		*armresources.Client
+	metricsClient			*azquery.MetricsClient
+}
+
+func cloud(cfg *Config) cloud.Configuration {
+	cloudToUse := cloud.AzurePublic
+	if cfg.Cloud == azureGovernmentCloud {
+		cloudToUse = cloud.AzureGovernment
+	}
+	return cloudToUse
+}
+func newResourcesProvider(ctx context.Context, cfg *Config) (*resourcesProvider, error) {
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	opts := &arm.ClientOptions{
+		ClientOptions: azcore.ClientOptions{
+			Cloud: cloud(cfg)
+		},
+	}
+
+	clientFactory := armresources.NewClientFactory(cfg.SubscriptionID, cred, opts)
+	resourceGroupsClient := clientFactory.NewResourceGroupsClient(cfg.SubscriptionID)
+	resourcesClient := clientFactory.NewClient(cfg.SubscriptionID)
+	metricsClient := azquery.NewMetricsClient(cfg.SubscriptionID)
+
+	return &resourcesProvider{
+		clientFactory: clientFactory,
+		resourceGroupsClients: resourceGroupsClient,
+		resourcesClient: resourcesClient,
+		metricsClient: metricsClient,
+	}, nil
+}
+
+func (rp *resourcesProvider) getResourceGroups(ctx context.Context) ([]*armresources.ResourceGroup, error) {
+	pager := rp.resourceGroupsClient.NewListPager(nil)
+	var resourceGroups []*armresources.ResourceGroup
+	if err := azuresdk.ProcessPager(
+		ctx,
+		pager,
+		func(page armresources.ResourceGroupsClientListResponse) []*armresources.ResourceGroup {
+			return page.Value
+		},
+		func(ctx context.Context, rg *armresources.ResourceGroup) error {
+			resourceGroups = append(resourceGroups, rg)
+			return nil
+		},
+	) err != nil {
+		return nil, err
+	}
+	return resourceGroups, nil
+}
+
+func (rp *resourcesProvider) getResourceGroupsAsync(ctx context.Context, opts *armresources.ResourceGroupsClientListOptions) ([]*armresources.ResourceGroup, error) {
+	pager := rp.resourceGroupsClient.NewListPager(nil)
+	c := make(chan *armresources.ResourceGroup)
+	if err := azuresdk.ProcessPager(
+		ctx,
+		pager,
+		func(page armresources.ResourceGroupsClientListResponse) []*armresources.ResourceGroup {
+			return page.Value
+		},
+		func(ctx context.Context, rg *armresources.ResourceGroup) error {
+			c <- rg
+			return nil
+		},
+	) err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+
+
+func (rp *resourcesProvider) getResources(ctx context.Context, opts *armresources.ClientListOptions) ([]*armresources.GenericResourceExpanded, error) {
+	pager := rp.resourcesClient.NewListPager(opts)
+	var resources []*armresources.GenericResourceExpanded
+	if err := azuresdk.ProcessPager(
+		ctx,
+		pager,
+		func(page armresources.ClientListResponse) []*armresources.GenericResourceExpanded {
+			return page.Value
+		},
+		func(ctx context.Context, resource *armresources.GenericResourceExpanded) error {
+			resources = append(resources, resource)
+			return nil
+		},
+	) err != nil {
+		return nil, err
+	}
+	return resources, nil
+}
+
+func (rp *resourcesProvider) getResourcesAsync(ctx context.Context, opts *armresources.ClientListOptions) (chan<- *armresources.GenericResourceExpanded, error) {
+	pager := rp.resourcesClient.NewListPager(opts)
+	c := make(chan *armresources.GenericResourceExpanded)
+	if err := azuresdk.ProcessPager(
+		ctx,
+		pager,
+		func(page armresources.ClientListResponse) []*armresources.GenericResourceExpanded {
+			return page.Value
+		},
+		func(ctx context.Context, resource *armresources.GenericResourceExpanded) error {
+			c <- resource
+			return nil
+		},
+	) err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+type MonitorClient interface {
+	GetResourceGroups(ctx context.Context) ([]*armresources.ResourceGroup, error)
+	GetResources(ctx context.Context) ([]*armresources.GenericResourceExpanded, error)
+	GetMetricsDefinitions(ctx context.Context, resourceID string) ([]*azquery.MetricDefinition, error)
+	GetMetrics(ctx context.Context, resourceID string) ([]*azquery.Metric, error)
+}
+*/

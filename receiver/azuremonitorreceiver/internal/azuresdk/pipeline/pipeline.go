@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 package azuresdk // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/azuremonitorreceiver/internal/azuresdk"
-
+/*
 import (
 	"context"
 	"log"
@@ -124,7 +124,6 @@ func genericStage[IN any, OUT any, RESP any, OPTS any](
 	return outC, errC
 }
 
-/*
 func (p *pipeline) resourceGroupsStage(
     ctx context.Context,
     opts armresources.ResourceGroupsClientListOptions,
@@ -154,7 +153,7 @@ func (p *pipeline) resourceGroupsStage(
 		handler,
 	)
 }
-*/
+
 func (s *pipeline) resourcesStage(
     ctx context.Context,
     opts *armresources.ClientListByResourceGroupOptions,
@@ -239,7 +238,7 @@ func (s *pipeline) metricValuesStage(ctx context.Context, inC <-chan string, err
 
 	return outC, errC
 }
-*/
+
 func (p *pipeline) run() {
 	// The pipeline proceeds as follows:
 	//
@@ -290,3 +289,4 @@ func (p PagerFactoryWithOptions[IN, OPTS, RESP]) CreatePager(item IN, opts OPTS)
 func (p PagerFactoryWithOptions[IN, OPTS, RESP]) CreatePagerWithOptions(opts OPTS) *runtime.Pager[RESP] {
     return p.fn(opts)
 }
+*/

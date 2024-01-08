@@ -10,12 +10,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/monitor/azquery"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/azuremonitorreceiver/internal/azuresdk"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/receiver"
 )
+
+// TODO: this package could use some refactoring to align more closely with patterns in other receivers.
 
 const metricsPrefix = "azure_"
 
@@ -208,6 +213,34 @@ func (mb *MetricsBuilder) addMetric(resourceMetricID, logicalMetricID, unit stri
 	return mb.metrics[resourceMetricID], nil
 }
 
+// Can we change this to AddMetric(resourceID, metric)?
+// In this function we can (1) flatten to multiple metrics by aggregation type, (2) add resource attributes,
+func (mb *MetricsBuilder) AddMetric(resource *armresources.GenericResourceExpanded, metric *azquery.Metric) {
+	// 1. calculate resource attributes
+	// 2. calculate metric attributes
+	// 3. lookup metric definition
+	// 4. calculate metric unit
+	//
+	// range over metric values
+	// adding metrics to the builder
+	// 5. calculate metric name
+
+	// range over timeseries elements
+	// 		range over aggregations
+	// 			range over values
+	// 				add datapoint to metric
+
+	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(mb.startTime)
+	dp.SetTimestamp(ts)
+	dp.SetDoubleValue(val)
+	dp.Attributes().PutStr("azuremonitor.resource_id", *resource.ID)
+	attrs := azuresdk.CalculateResourceAttributes(resource)
+	for key, value := range attrs {
+		dp.Attributes().PutStr(key, *value)
+	}
+}
+
 func (mb *MetricsBuilder) AddDataPoint(
 	resourceID,
 	metric,
@@ -225,6 +258,7 @@ func (mb *MetricsBuilder) AddDataPoint(
 		var err error
 		m, err = mb.addMetric(resourceMetricID, logicalMetricID, unit)
 		if err != nil {
+			// TODO: handle errors
 			log.Println(err)
 		}
 	}
