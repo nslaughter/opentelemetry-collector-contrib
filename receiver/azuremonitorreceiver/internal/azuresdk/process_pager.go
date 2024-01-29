@@ -16,7 +16,7 @@ import (
 // https://learn.microsoft.com/en-us/azure/developer/go/azure-sdk-core-concepts#pagination-methods-that-return-collections
 // for examples like the pattern used here.
 
-// Client code can provide concurrency within the ProcessorFunc, but I decided to omit providing concurrency here.
+// Client code can provide concurrency within the ProcessorFunc.
 
 // T represents the type of data that the ProcessorFunc operates on. U represents the type of data that the ExtractorFunc returns.
 // ExtractorFunc exists to help infer concrete types in Go, which doesn'generalize over value fields.

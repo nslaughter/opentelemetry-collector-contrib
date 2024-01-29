@@ -28,7 +28,9 @@ func NewFactory() receiver.Factory {
 	return receiver.NewFactory(
 		metadata.Type,
 		createDefaultConfig,
-		receiver.WithMetrics(createMetricsReceiver, metadata.MetricsStability))
+		receiver.WithMetrics(createMetricsReceiver, metadata.MetricsStability),
+		// receiver.WithLogs(createLogsReceiver, component.StabilityLevelDevelopment))
+	)
 }
 
 func createDefaultConfig() component.Config {
@@ -61,3 +63,15 @@ func createMetricsReceiver(_ context.Context, params receiver.CreateSettings, rC
 
 	return scraperhelper.NewScraperControllerReceiver(&cfg.ScraperControllerSettings, params, consumer, scraperhelper.AddScraper(scraper))
 }
+
+// type osQueryReceiver struct {
+// 	config       *Config
+// 	logger       *zap.Logger
+// 	client       *osquery.ExtensionManagerClient
+// 	logsConsumer consumer.Logs
+// }
+
+// func createLogsReceiver(context.Context,
+// 	//component.ReceiverCreateSettings, component.Receiver, consumer.Logs) (component.LogsReceiver, error) {
+// 	return nil, errors.New("logs receiver not supported")
+// }

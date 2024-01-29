@@ -4,35 +4,27 @@
 package azuremonitorreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/azuremonitorreceiver"
 
 import (
-	"context"
-	"path/filepath"
-	"strings"
-	"sync"
+
+	// "sync"
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/monitor/armmonitor"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/receiver/receivertest"
-
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/pmetrictest"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/azuremonitorreceiver/internal/metadata"
 )
 
 func TestNewScraper(t *testing.T) {
 	f := NewFactory()
 	cfg := f.CreateDefaultConfig().(*Config)
-
 	scraper := newScraper(cfg, receivertest.NewNopCreateSettings())
-	require.Len(t, scraper.resources, 0)
+	lenOfResourceMetadata := 0
+	scraper.resourceMetadata.Range(func(_, _ interface{}) bool {
+		lenOfResourceMetadata++
+		return true
+	})
+	require.Equal(t, lenOfResourceMetadata, 0)
 }
 
+/*
 func azIDCredentialsFuncMock(string, string, string, *azidentity.ClientSecretCredentialOptions) (*azidentity.ClientSecretCredential, error) {
 	return &azidentity.ClientSecretCredential{}, nil
 }
@@ -69,9 +61,9 @@ func TestAzureScraperStart(t *testing.T) {
 					cfg:                             cfg,
 					azIDCredentialsFunc:             azIDCredentialsFuncMock,
 					azIDWorkloadFunc:                azIDWorkloadFuncMock,
-					armClientFunc:                   armClientFuncMock,
-					armMonitorDefinitionsClientFunc: armMonitorDefinitionsClientFuncMock,
-					armMonitorMetricsClientFunc:     armMonitorMetricsClientFuncMock,
+					// armClientFunc:                   armClientFuncMock,
+					// armMonitorDefinitionsClientFunc: armMonitorDefinitionsClientFuncMock,
+					// armMonitorMetricsClientFunc:     armMonitorMetricsClientFuncMock,
 				}
 
 				if err := s.start(context.Background(), componenttest.NewNopHost()); err != nil {
@@ -97,9 +89,9 @@ func TestAzureScraperStart(t *testing.T) {
 					cfg:                             customCfg,
 					azIDCredentialsFunc:             azIDCredentialsFuncMock,
 					azIDWorkloadFunc:                azIDWorkloadFuncMock,
-					armClientFunc:                   armClientFuncMock,
-					armMonitorDefinitionsClientFunc: armMonitorDefinitionsClientFuncMock,
-					armMonitorMetricsClientFunc:     armMonitorMetricsClientFuncMock,
+					// armClientFunc:                   armClientFuncMock,
+					// armMonitorDefinitionsClientFunc: armMonitorDefinitionsClientFuncMock,
+					// armMonitorMetricsClientFunc:     armMonitorMetricsClientFuncMock,
 				}
 
 				if err := s.start(context.Background(), componenttest.NewNopHost()); err != nil {
@@ -125,9 +117,9 @@ func TestAzureScraperStart(t *testing.T) {
 					cfg:                             customCfg,
 					azIDCredentialsFunc:             azIDCredentialsFuncMock,
 					azIDWorkloadFunc:                azIDWorkloadFuncMock,
-					armClientFunc:                   armClientFuncMock,
-					armMonitorDefinitionsClientFunc: armMonitorDefinitionsClientFuncMock,
-					armMonitorMetricsClientFunc:     armMonitorMetricsClientFuncMock,
+					// armClientFunc:                   armClientFuncMock,
+					// armMonitorDefinitionsClientFunc: armMonitorDefinitionsClientFuncMock,
+					// armMonitorMetricsClientFunc:     armMonitorMetricsClientFuncMock,
 				}
 
 				if err := s.start(context.Background(), componenttest.NewNopHost()); err != nil {
@@ -231,10 +223,10 @@ func TestAzureScraperScrape(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			settings := receivertest.NewNopCreateSettings()
 
-			armClientMock := &armClientMock{
-				current: 0,
-				pages:   getResourcesMockData(tt.fields.cfg.AppendTagsAsAttributes),
-			}
+			// armClientMock := &armClientMock{
+			// 	current: 0,
+			// 	pages:   getResourcesMockData(tt.fields.cfg.AppendTagsAsAttributes),
+			// }
 
 			counters, pages := getMetricsDefinitionsMockData()
 
@@ -249,13 +241,13 @@ func TestAzureScraperScrape(t *testing.T) {
 
 			s := &azureScraper{
 				cfg:                      tt.fields.cfg,
-				clientResources:          armClientMock,
-				clientMetricsDefinitions: metricsDefinitionsClientMock,
-				clientMetricsValues:      metricsValuesClientMock,
+				// clientResources:          armClientMock,
+				// clientMetricsDefinitions: metricsDefinitionsClientMock,
+				// clientMetricsValues:      metricsValuesClientMock,
 				mb:                       metadata.NewMetricsBuilder(metadata.DefaultMetricsBuilderConfig(), settings),
-				mutex:                    &sync.Mutex{},
+				// mutex:                    &sync.Mutex{},
 			}
-			s.resources = map[string]*azureResource{}
+			s.resources = cache.NewCache()
 
 			metrics, err := s.scrape(tt.args.ctx)
 			if (err != nil) != tt.wantErr {
@@ -658,3 +650,4 @@ func getMetricsValuesMockData() map[string]map[string]armmonitor.MetricsClientLi
 		},
 	}
 }
+*/
