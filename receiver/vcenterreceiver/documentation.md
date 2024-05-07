@@ -458,6 +458,48 @@ metrics:
     enabled: true
 ```
 
+### vcenter.cluster.vm_template.count
+
+The number of virtual machine templates in the cluster.
+
+| Unit | Metric Type | Value Type | Aggregation Temporality | Monotonic |
+| ---- | ----------- | ---------- | ----------------------- | --------- |
+| {virtual_machine_templates} | Sum | Int | Cumulative | false |
+
+### vcenter.host.network.packet.error.rate
+
+The rate of packet errors transmitted or received on the host network.
+
+As measured over the most recent 20s interval.
+
+| Unit | Metric Type | Value Type |
+| ---- | ----------- | ---------- |
+| {errors/sec} | Gauge | Double |
+
+#### Attributes
+
+| Name | Description | Values |
+| ---- | ----------- | ------ |
+| direction | The direction of network throughput. | Str: ``transmitted``, ``received`` |
+| object | The object on the virtual machine or host that is being reported on. | Any Str |
+
+### vcenter.host.network.packet.rate
+
+The rate of packets transmitted or received across each physical NIC (network interface controller) instance on the host.
+
+As measured over the most recent 20s interval.
+
+| Unit | Metric Type | Value Type |
+| ---- | ----------- | ---------- |
+| {packets/sec} | Gauge | Double |
+
+#### Attributes
+
+| Name | Description | Values |
+| ---- | ----------- | ------ |
+| direction | The direction of network throughput. | Str: ``transmitted``, ``received`` |
+| object | The object on the virtual machine or host that is being reported on. | Any Str |
+
 ### vcenter.vm.memory.utilization
 
 The memory utilization of the VM.
@@ -465,6 +507,23 @@ The memory utilization of the VM.
 | Unit | Metric Type | Value Type |
 | ---- | ----------- | ---------- |
 | % | Gauge | Double |
+
+### vcenter.vm.network.packet.rate
+
+The rate of packets transmitted or received by each vNIC (virtual network interface controller) on the virtual machine.
+
+As measured over the most recent 20s interval.
+
+| Unit | Metric Type | Value Type |
+| ---- | ----------- | ---------- |
+| {packets/sec} | Gauge | Double |
+
+#### Attributes
+
+| Name | Description | Values |
+| ---- | ----------- | ------ |
+| direction | The direction of network throughput. | Str: ``transmitted``, ``received`` |
+| object | The object on the virtual machine or host that is being reported on. | Any Str |
 
 ## Resource Attributes
 
@@ -480,3 +539,5 @@ The memory utilization of the VM.
 | vcenter.virtual_app.name | The name of the vApp. | Any Str | false |
 | vcenter.vm.id | The instance UUID of the virtual machine. | Any Str | true |
 | vcenter.vm.name | The name of the virtual machine. | Any Str | true |
+| vcenter.vm_template.id | The instance UUID of the virtual machine template. | Any Str | false |
+| vcenter.vm_template.name | The name of the virtual machine template. | Any Str | false |
